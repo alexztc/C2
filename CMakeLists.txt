@@ -15,7 +15,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -Wall -pedantic")
 
 find_package(Boost REQUIRED)
 
-include_directories(include lib/ds2i lib/sux baseline_marisa/marisa/lib)
+include_directories(include lib/ds2i lib/sux baseline_marisa/marisa/include baseline_marisa/marisa/lib)
 add_subdirectory(lib/ds2i/succinct)
 add_subdirectory(lib/sdsl-lite)
 add_subdirectory(lib/fsst)

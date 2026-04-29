@@ -327,6 +327,88 @@ class FstCC {
     return -1;
   }
 
+  // Returns the leaf_id of the smallest key >= `key` (uint32_t(-1) if none).
+  // The wrapper verifies sorted_keys_[id] >= key and increments if the string-pool suffix compare is off.
+  auto seek(const key_type &key) const -> uint32_t {
+    uint32_t len = key.size();
+    uint32_t matched_len = 0;
+    uint32_t pos = 0;  // first edge of root
+    std::vector<uint32_t> stk;  // stack of matched edge positions for backtracking
+
+    while (true) {
+      if (matched_len == len) {
+        // Consumed all query characters; key is in trie (prefix key) or a prefix of trie keys
+        if (get_label(pos) == terminator_) return topo_.leaf_id(pos);
+        return get_min_leaf_from(pos);
+      }
+
+      uint32_t end = topo_.node_end(pos);
+      uint8_t q = (uint8_t)key[matched_len];
+
+      // Linear scan: find exact match (fp) or first label > q (sp) in [pos, end)
+      uint32_t fp = end, sp = end;
+      for (uint32_t p = pos; p < end; p++) {
+        uint8_t lbl = get_label(p);
+        if (lbl == q)   { fp = p; break; }
+        if (lbl > q)    { sp = p; break; }
+      }
+
+      if (fp < end) {
+        // Exact char match; try to descend
+        matched_len++;
+        if (!topo_.has_child(fp)) {
+          uint32_t lid = topo_.leaf_id(fp);
+          if (!is_link_.get(lid)) {
+            if (matched_len == len) return lid;  // exact match
+            // trie key shorter than query; look for next sibling
+          } else {
+            return lid;  // string-pool suffix; wrapper verifies >= key
+          }
+          // Seek next sibling after fp, then backtrack
+          uint32_t nend = topo_.node_end(fp);
+          if (fp + 1 < nend) return get_min_leaf_from(fp + 1);
+        } else {
+          stk.push_back(fp);
+          pos = topo_.child_pos(fp);
+          continue;
+        }
+      } else if (sp < end) {
+        return get_min_leaf_from(sp);
+      }
+      // All labels exhausted or trie key was shorter; backtrack via stack
+      while (!stk.empty()) {
+        uint32_t pe = stk.back(); stk.pop_back();
+        uint32_t pend = topo_.node_end(pe);
+        if (pe + 1 < pend) return get_min_leaf_from(pe + 1);
+      }
+      return uint32_t(-1);
+    }
+  }
+
+  // Returns count of stored keys that have the given prefix. Correct with suffix compression.
+  auto prefix_count(const key_type &prefix) const -> uint32_t {
+    uint32_t pos = 0, matched = 0;
+    uint32_t len = prefix.size();
+    while (matched < len) {
+      uint32_t end = topo_.node_end(pos);
+      pos = labels_.find(prefix[matched], pos, end);
+      if (pos == end) return 0;
+      matched++;
+      if (!topo_.has_child(pos)) {
+        auto leaf_id = topo_.leaf_id(pos);
+        if (matched == len) return 1;       // prefix consumed exactly at leaf
+        if (!is_link_.get(leaf_id)) return 0; // leaf key terminates here, shorter than prefix
+        // Linked leaf: the suffix in next_ is > link_cutoff_ chars. next_->match would
+        // return -1 when the stored key is longer than the remaining prefix (key[len]=='\0'
+        // mismatches the next stored char). Since queries are always prefixes of stored keys,
+        // the single key at this leaf is guaranteed to start with the full prefix → count 1.
+        return 1;
+      }
+      pos = topo_.child_pos(pos);
+    }
+    return count_subtree_leaves(pos);
+  }
+
   // return the cutoffs between levels
   auto get_level_boundaries() const -> std::vector<uint32_t> {
     return topo_.get_level_boundaries();
@@ -344,6 +426,24 @@ class FstCC {
     return (labels_.size_in_bytes() + topo_.size_in_bytes() + is_link_.size_in_bytes()) * 8;
   }
  private:
+  auto get_min_leaf_from(uint32_t pos) const -> uint32_t {
+    while (topo_.has_child(pos)) pos = topo_.child_pos(pos);
+    return topo_.leaf_id(pos);
+  }
+
+  auto count_subtree_leaves(uint32_t pos) const -> uint32_t {
+    uint32_t count = 0;
+    uint32_t end = topo_.node_end(pos);
+    for (uint32_t p = pos; p < end; p++) {
+      if (!topo_.has_child(p)) {
+        count++;
+      } else {
+        count += count_subtree_leaves(topo_.child_pos(p));
+      }
+    }
+    return count;
+  }
+
   void build(const KeySet<key_type> &key_set, bool temp = false,
              int max_recursion = 0, int mask = 0) {
     KeySet<key_type> suffixes;

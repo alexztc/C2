@@ -243,6 +243,58 @@ class MarisaCC : public StringPool<Key> {
   }
 #endif
 
+  // returns leaf_id of the smallest key >= query; uint32_t(-1) if none exists
+  template <bool rev = reverse, typename = std::enable_if_t<!rev>>
+  auto seek(const key_type &key) const -> uint32_t {
+    uint32_t len = key.size();
+    uint32_t matched_len = 0;
+    uint32_t pos = 0;
+    std::vector<uint32_t> stk;
+
+    while (true) {
+      if (matched_len == len) {
+        if (labels_[pos] == terminator_) return topo_.leaf_id(pos);
+        return get_min_leaf_from(pos);
+      }
+      uint32_t end = topo_.node_end(pos);
+      uint8_t q = (uint8_t)key[matched_len];
+      uint32_t fp = end, sp = end;
+      for (uint32_t p = pos; p < end; p++) {
+        uint8_t lbl = labels_[p];
+        if (lbl == q) { fp = p; break; }
+        if (lbl > q)  { sp = p; break; }
+      }
+      if (fp < end) {
+        matched_len++;
+        if (topo_.is_link(fp)) {
+          uint32_t link_len = next_->match(key, matched_len, topo_.link_id(fp));
+          if (link_len != uint32_t(-1)) {
+            matched_len += link_len;
+          } else {
+            // suffix mismatch: return conservative min leaf; wrapper corrects via linear scan
+            return get_min_leaf_from(fp);
+          }
+        }
+        if (!topo_.has_child(fp)) {
+          if (matched_len >= len) return topo_.leaf_id(fp);
+          if (fp + 1 < end) return get_min_leaf_from(fp + 1);
+        } else {
+          stk.push_back(fp);
+          pos = topo_.child_pos(fp);
+          continue;
+        }
+      } else if (sp < end) {
+        return get_min_leaf_from(sp);
+      }
+      while (!stk.empty()) {
+        uint32_t pe = stk.back(); stk.pop_back();
+        uint32_t pend = topo_.node_end(pe);
+        if (pe + 1 < pend) return get_min_leaf_from(pe + 1);
+      }
+      return uint32_t(-1);
+    }
+  }
+
   // returns matched length (-1 on mismatch)
   auto match(const key_type &key, uint32_t begin, uint32_t key_id) const -> uint32_t override {
     if constexpr (!reverse_) {
@@ -550,6 +602,11 @@ class MarisaCC : public StringPool<Key> {
     }
   }
 #endif
+
+  auto get_min_leaf_from(uint32_t pos) const -> uint32_t {
+    while (topo_.has_child(pos)) pos = topo_.child_pos(pos);
+    return topo_.leaf_id(pos);
+  }
 
   topo_t topo_;
   label_vec labels_;

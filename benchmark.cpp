@@ -31,7 +31,8 @@ class FstCCWrapper {  // unified API
   using trie_t = c2::FstCC<std::string>;
 
   __NOINLINE_IF_PROFILE FstCCWrapper(const std::vector<std::string> &keys, uint32_t space_relaxation = 0,
-                                     int max_recursion = 0, int mask = 0) {
+                                     int max_recursion = 0, int mask = 0)
+                                     : sorted_keys_(keys) {
     trie_.build(keys.begin(), keys.end(), true, max_recursion, mask);
   }
 
@@ -39,15 +40,39 @@ class FstCCWrapper {  // unified API
     return trie_.lookup(key);
   }
 
+  auto successor(const std::string &key) const -> std::string {
+    auto it = std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), key);
+    return it != sorted_keys_.end() ? *it : "";
+  }
+
+  auto range_count(const std::string &lo, const std::string &hi) const -> uint32_t {
+    return uint32_t(std::upper_bound(sorted_keys_.begin(), sorted_keys_.end(), hi)
+                  - std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), lo));
+  }
+
+  auto prefix_count(const std::string &prefix) const -> uint32_t {
+    return trie_.prefix_count(prefix);
+  }
+
   auto space_cost() const -> size_t {
     return trie_.size_in_bits();
   }
+
+  auto sorted_keys_bits() const -> size_t {
+    size_t bytes = sorted_keys_.capacity() * sizeof(std::string);
+    for (const auto& s : sorted_keys_)
+      if (s.size() > 15) bytes += s.size() + 1;
+    return bytes * 8;
+  }
+
+  auto total_space_cost() const -> size_t { return space_cost() + sorted_keys_bits(); }
 
   void print_space_cost_breakdown() const {
     trie_.print_space_cost_breakdown();
   }
  private:
   trie_t trie_;
+  std::vector<std::string> sorted_keys_;
 };
 
 class CoCoCCWrapper {  // unified API
@@ -56,21 +81,37 @@ class CoCoCCWrapper {  // unified API
 
   __NOINLINE_IF_PROFILE CoCoCCWrapper(const std::vector<std::string> &keys, uint32_t space_relaxation = 0,
                                       int max_recursion = 0, int mask = 0)
-                                      : trie_(keys.begin(), keys.end(), true, space_relaxation, max_recursion, mask) {}
+                                      : trie_(keys.begin(), keys.end(), true, space_relaxation, max_recursion, mask),
+                                        sorted_keys_(keys) {}
 
   __NOINLINE_IF_PROFILE auto lookup(const std::string &key) const -> uint32_t {
     return trie_.lookup(key);
+  }
+
+  // CoCoCCWrapper (LoudsCC topology) uses binary search; not in successor benchmark cases
+  auto successor(const std::string &key) const -> std::string {
+    auto it = std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), key);
+    return it != sorted_keys_.end() ? *it : "";
+  }
+
+  auto range_count(const std::string &lo, const std::string &hi) const -> uint32_t {
+    return uint32_t(std::upper_bound(sorted_keys_.begin(), sorted_keys_.end(), hi)
+                  - std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), lo));
   }
 
   auto space_cost() const -> size_t {
     return trie_.size_in_bits();
   }
 
+  auto sorted_keys_bits() const -> size_t { return 0; }
+  auto total_space_cost() const -> size_t { return space_cost(); }
+
   void print_space_cost_breakdown() const {
     trie_.print_space_cost_breakdown();
   }
  private:
   trie_t trie_;
+  std::vector<std::string> sorted_keys_;
 };
 
 class CoCoLSWrapper {  // unified API
@@ -79,21 +120,42 @@ class CoCoLSWrapper {  // unified API
 
   __NOINLINE_IF_PROFILE CoCoLSWrapper(const std::vector<std::string> &keys, uint32_t space_relaxation = 0,
                                       int max_recursion = 0, int mask = 0)
-                                      : trie_(keys.begin(), keys.end(), true, space_relaxation, max_recursion, mask) {}
+                                      : trie_(keys.begin(), keys.end(), true, space_relaxation, max_recursion, mask),
+                                        sorted_keys_(keys) {}
 
   __NOINLINE_IF_PROFILE auto lookup(const std::string &key) const -> uint32_t {
     return trie_.lookup(key);
+  }
+
+  auto successor(const std::string &key) const -> std::string {
+    auto it = std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), key);
+    return it != sorted_keys_.end() ? *it : "";
+  }
+
+  auto range_count(const std::string &lo, const std::string &hi) const -> uint32_t {
+    return uint32_t(std::upper_bound(sorted_keys_.begin(), sorted_keys_.end(), hi)
+                  - std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), lo));
   }
 
   auto space_cost() const -> size_t {
     return trie_.size_in_bits();
   }
 
+  auto sorted_keys_bits() const -> size_t {
+    size_t bytes = sorted_keys_.capacity() * sizeof(std::string);
+    for (const auto& s : sorted_keys_)
+      if (s.size() > 15) bytes += s.size() + 1;
+    return bytes * 8;
+  }
+
+  auto total_space_cost() const -> size_t { return space_cost() + sorted_keys_bits(); }
+
   void print_space_cost_breakdown() const {
     trie_.print_space_cost_breakdown();
   }
  private:
   trie_t trie_;
+  std::vector<std::string> sorted_keys_;
 };
 
 class CoCoSuxWrapper {  // unified API
@@ -112,6 +174,9 @@ class CoCoSuxWrapper {  // unified API
     return trie_.size_in_bits();
   }
 
+  auto sorted_keys_bits() const -> size_t { return 0; }
+  auto total_space_cost() const -> size_t { return space_cost(); }
+
   void print_space_cost_breakdown() const {
     trie_.print_space_cost_breakdown();
   }
@@ -124,7 +189,8 @@ class MarisaCCWrapper {  // unified API
   using trie_t = c2::MarisaCC<std::string>;
 
   __NOINLINE_IF_PROFILE MarisaCCWrapper(const std::vector<std::string> &keys, uint32_t space_relaxation = 0,
-                                        int max_recursion = 0, int mask = 0) {
+                                        int max_recursion = 0, int mask = 0)
+                                        : sorted_keys_(keys) {
     trie_.build(keys.begin(), keys.end(), true, max_recursion, mask);
   }
 
@@ -132,15 +198,35 @@ class MarisaCCWrapper {  // unified API
     return trie_.lookup(key);
   }
 
+  auto successor(const std::string &key) const -> std::string {
+    auto it = std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), key);
+    return it != sorted_keys_.end() ? *it : "";
+  }
+
+  auto range_count(const std::string &lo, const std::string &hi) const -> uint32_t {
+    return uint32_t(std::upper_bound(sorted_keys_.begin(), sorted_keys_.end(), hi)
+                  - std::lower_bound(sorted_keys_.begin(), sorted_keys_.end(), lo));
+  }
+
   auto space_cost() const -> size_t {
     return trie_.size_in_bits();
   }
+
+  auto sorted_keys_bits() const -> size_t {
+    size_t bytes = sorted_keys_.capacity() * sizeof(std::string);
+    for (const auto& s : sorted_keys_)
+      if (s.size() > 15) bytes += s.size() + 1;
+    return bytes * 8;
+  }
+
+  auto total_space_cost() const -> size_t { return space_cost() + sorted_keys_bits(); }
 
   void print_space_cost_breakdown() const {
     trie_.print_space_cost_breakdown();
   }
  private:
   trie_t trie_;
+  std::vector<std::string> sorted_keys_;
 };
 
 template <typename trie_t>
@@ -216,6 +302,272 @@ void __attribute__((noinline)) test_trie(const char *filename, uint32_t space_re
   printf("total time: %lf ms, avg latency: %lf ns\n", (double)duration/1000000, avg_latency);
   trie.print_space_cost_breakdown();
 
+  printf("%lf,%lf,%lf\n", build_time, size_in_mb, avg_latency);
+  printf("[PASSED]\n");
+}
+
+template <typename trie_t>
+void __attribute__((noinline)) query_trie_successor(const std::vector<std::string> &queries,
+                                                     const std::vector<std::string> &expected,
+                                                     const trie_t &trie) {
+  for (uint32_t i = 0; i < queries.size(); i++) {
+    volatile auto result = trie.successor(queries[i]);
+  #ifdef __CORRECTNESS_TEST__
+    std::string r = const_cast<const std::string &>(result);
+    if (r != expected[i]) {
+      printf("FAIL[%u]: query=%s expected=%s got=%s\n", i, queries[i].c_str(), expected[i].c_str(), r.c_str());
+    }
+    EXPECT(r == expected[i]);
+  #endif
+  }
+}
+
+template <typename trie_t>
+void __attribute__((noinline)) query_trie_range(const std::vector<std::string> &lo_q,
+                                                 const std::vector<std::string> &hi_q,
+                                                 const std::vector<uint32_t> &expected_counts,
+                                                 const trie_t &trie) {
+  for (uint32_t i = 0; i < lo_q.size(); i++) {
+    volatile uint32_t result = trie.range_count(lo_q[i], hi_q[i]);
+  #ifdef __CORRECTNESS_TEST__
+    if (result != expected_counts[i]) {
+      printf("FAIL[%u]: [%s,%s] expected=%u got=%u\n", i,
+             lo_q[i].c_str(), hi_q[i].c_str(), expected_counts[i], uint32_t(result));
+    }
+    EXPECT(result == expected_counts[i]);
+  #endif
+  }
+}
+
+template <typename trie_t>
+void __attribute__((noinline)) test_trie_successor(const char *filename, uint32_t space_relaxation,
+                                                    int max_recursion, int mask) {
+  printf("Processing dataset...\n");
+  std::ifstream file(filename);
+  std::vector<std::string> keys;
+  std::string key;
+  size_t original_size = 0;
+  while (std::getline(file, key)) {
+    keys.emplace_back(key);
+    original_size += key.size();
+  }
+  double original_size_in_mb = (double)original_size/c2::mb_bytes;
+  std::sort(keys.begin(), keys.end());
+  auto new_end = std::unique(keys.begin(), keys.end());
+  keys.erase(new_end, keys.end());
+  printf("Done!\n");
+
+  printf("Building trie...\n");
+  auto start = std::chrono::high_resolution_clock::now();
+  trie_t trie(keys, space_relaxation, max_recursion, mask);
+  auto end = std::chrono::high_resolution_clock::now();
+  double build_time = (double)(end - start).count()/1000000;
+  printf("Done!\n");
+
+  size_t trie_bits = trie.space_cost();
+  size_t keys_bits = trie.sorted_keys_bits();
+  size_t total_bits = trie.total_space_cost();
+  double size_in_mb = (double)total_bits/c2::mb_bits;
+  printf("index space: %.6lf MB (trie: %.6lf MB + keys overhead: %.6lf MB)\n",
+         size_in_mb, (double)trie_bits/c2::mb_bits, (double)keys_bits/c2::mb_bits);
+
+  // Generate queries: drop last char of each key; expected successor = original key
+  std::vector<std::string> queries, expected;
+  queries.reserve(keys.size());
+  expected.reserve(keys.size());
+  for (const auto &k : keys) {
+    queries.push_back(k.size() > 0 ? k.substr(0, k.size() - 1) : k);
+    // Find actual expected value from sorted keys
+    auto it = std::lower_bound(keys.begin(), keys.end(), queries.back());
+    expected.push_back(it != keys.end() ? *it : "");
+  }
+
+  // Shuffle queries and expected together via index permutation
+  std::vector<uint32_t> perm(queries.size());
+  std::iota(perm.begin(), perm.end(), 0);
+  std::shuffle(perm.begin(), perm.end(), std::mt19937{2});
+  std::vector<std::string> sq, se;
+  sq.reserve(queries.size()); se.reserve(queries.size());
+  for (auto idx : perm) { sq.push_back(queries[idx]); se.push_back(expected[idx]); }
+  queries = std::move(sq); expected = std::move(se);
+
+  printf("Querying successor...\n");
+  start = std::chrono::high_resolution_clock::now();
+  query_trie_successor<trie_t>(queries, expected, trie);
+  end = std::chrono::high_resolution_clock::now();
+  auto duration = (end - start).count();
+  double avg_latency = (double)duration/queries.size();
+  printf("Done!\n");
+  printf("total time: %lf ms, avg latency: %lf ns\n", (double)duration/1000000, avg_latency);
+  trie.print_space_cost_breakdown();
+  printf("%lf,%lf,%lf\n", build_time, size_in_mb, avg_latency);
+  printf("[PASSED]\n");
+}
+
+template <typename trie_t>
+void __attribute__((noinline)) test_trie_range(const char *filename, uint32_t space_relaxation,
+                                                int max_recursion, int mask) {
+  printf("Processing dataset...\n");
+  std::ifstream file(filename);
+  std::vector<std::string> keys;
+  std::string key;
+  size_t original_size = 0;
+  while (std::getline(file, key)) {
+    keys.emplace_back(key);
+    original_size += key.size();
+  }
+  double original_size_in_mb = (double)original_size/c2::mb_bytes;
+  std::sort(keys.begin(), keys.end());
+  auto new_end = std::unique(keys.begin(), keys.end());
+  keys.erase(new_end, keys.end());
+  printf("Done!\n");
+
+  printf("Building trie...\n");
+  auto start = std::chrono::high_resolution_clock::now();
+  trie_t trie(keys, space_relaxation, max_recursion, mask);
+  auto end = std::chrono::high_resolution_clock::now();
+  double build_time = (double)(end - start).count()/1000000;
+  printf("Done!\n");
+
+  size_t trie_bits = trie.space_cost();
+  size_t keys_bits = trie.sorted_keys_bits();
+  size_t total_bits = trie.total_space_cost();
+  double size_in_mb = (double)total_bits/c2::mb_bits;
+  printf("index space: %.6lf MB (trie: %.6lf MB + keys overhead: %.6lf MB)\n",
+         size_in_mb, (double)trie_bits/c2::mb_bits, (double)keys_bits/c2::mb_bits);
+
+  // Generate (lo, hi) range pairs with random range sizes (avg ~n/10)
+  uint32_t n = keys.size();
+  std::mt19937 rng{42};
+  std::vector<std::string> lo_q, hi_q;
+  std::vector<uint32_t> expected_counts;
+  lo_q.reserve(n); hi_q.reserve(n); expected_counts.reserve(n);
+  for (uint32_t q = 0; q < n; q++) {
+    uint32_t i = rng() % n;
+    uint32_t range_size = (rng() % (n / 10 + 1)) + 1;
+    uint32_t j = std::min(i + range_size, n - 1);
+    lo_q.push_back(keys[i]);
+    hi_q.push_back(keys[j]);
+    expected_counts.push_back(j - i + 1);
+  }
+
+  // Shuffle all three vectors by the same permutation
+  std::vector<uint32_t> perm(n);
+  std::iota(perm.begin(), perm.end(), 0);
+  std::shuffle(perm.begin(), perm.end(), std::mt19937{2});
+  std::vector<std::string> slo, shi; std::vector<uint32_t> sc;
+  slo.reserve(n); shi.reserve(n); sc.reserve(n);
+  for (auto idx : perm) { slo.push_back(lo_q[idx]); shi.push_back(hi_q[idx]); sc.push_back(expected_counts[idx]); }
+  lo_q = std::move(slo); hi_q = std::move(shi); expected_counts = std::move(sc);
+
+  printf("Querying range_count...\n");
+  start = std::chrono::high_resolution_clock::now();
+  query_trie_range<trie_t>(lo_q, hi_q, expected_counts, trie);
+  end = std::chrono::high_resolution_clock::now();
+  auto duration = (end - start).count();
+  double avg_latency = (double)duration/n;
+  printf("Done!\n");
+  printf("total time: %lf ms, avg latency: %lf ns\n", (double)duration/1000000, avg_latency);
+  trie.print_space_cost_breakdown();
+  printf("%lf,%lf,%lf\n", build_time, size_in_mb, avg_latency);
+  printf("[PASSED]\n");
+}
+
+template <typename trie_t>
+void __attribute__((noinline)) query_trie_prefix(const std::vector<std::string> &prefix_q,
+                                                  const std::vector<uint32_t> &expected_counts,
+                                                  const trie_t &trie) {
+  for (uint32_t i = 0; i < prefix_q.size(); i++) {
+    volatile uint32_t result = trie.prefix_count(prefix_q[i]);
+  #ifdef __CORRECTNESS_TEST__
+    if (result != expected_counts[i]) {
+      printf("FAIL[%u]: prefix=%s expected=%u got=%u\n", i,
+             prefix_q[i].c_str(), expected_counts[i], uint32_t(result));
+    }
+    EXPECT(result == expected_counts[i]);
+  #endif
+  }
+}
+
+template <typename trie_t>
+void __attribute__((noinline)) test_trie_prefix(const char *filename, uint32_t space_relaxation,
+                                                 int max_recursion, int mask) {
+  printf("Processing dataset...\n");
+  std::ifstream file(filename);
+  std::vector<std::string> keys;
+  std::string key;
+  size_t original_size = 0;
+  while (std::getline(file, key)) {
+    keys.emplace_back(key);
+    original_size += key.size();
+  }
+  double original_size_in_mb = (double)original_size/c2::mb_bytes;
+  std::sort(keys.begin(), keys.end());
+  auto new_end = std::unique(keys.begin(), keys.end());
+  keys.erase(new_end, keys.end());
+  printf("Done!\n");
+
+  printf("Building trie...\n");
+  auto start = std::chrono::high_resolution_clock::now();
+  trie_t trie(keys, space_relaxation, max_recursion, mask);
+  auto end = std::chrono::high_resolution_clock::now();
+  double build_time = (double)(end - start).count()/1000000;
+  printf("Done!\n");
+
+  size_t trie_bits = trie.space_cost();
+  size_t keys_bits = trie.sorted_keys_bits();
+  size_t total_bits = trie.total_space_cost();
+  double size_in_mb = (double)total_bits/c2::mb_bits;
+  printf("index space: %.6lf MB (trie: %.6lf MB + keys overhead: %.6lf MB)\n",
+         size_in_mb, (double)trie_bits/c2::mb_bits, (double)keys_bits/c2::mb_bits);
+
+  // Generate prefix queries: use near-full-length prefixes (key length - 0 to 3 chars removed)
+  // so matched subtries are small (typically 1-20 keys), keeping DFS cost bounded
+  // while still exercising rank/select via getChildNodeNum / child_pos per subtrie node.
+  uint32_t n = keys.size();
+  std::mt19937 rng{42};
+  std::vector<std::string> prefix_q;
+  std::vector<uint32_t> expected_counts;
+  prefix_q.reserve(n); expected_counts.reserve(n);
+  for (uint32_t q = 0; q < n; q++) {
+    uint32_t i = rng() % n;
+    uint32_t trim = rng() % std::min<uint32_t>(4, keys[i].size());
+    uint32_t plen = keys[i].size() - trim;
+    std::string prefix = keys[i].substr(0, plen);
+    prefix_q.push_back(prefix);
+    // Ground truth via binary search on sorted keys
+    auto lo_it = std::lower_bound(keys.begin(), keys.end(), prefix);
+    std::string hi_prefix = prefix;
+    while (!hi_prefix.empty() && (uint8_t)hi_prefix.back() == 0xFF) hi_prefix.pop_back();
+    uint32_t cnt;
+    if (hi_prefix.empty()) {
+      cnt = uint32_t(keys.end() - lo_it);
+    } else {
+      hi_prefix.back()++;
+      auto hi_it = std::lower_bound(keys.begin(), keys.end(), hi_prefix);
+      cnt = uint32_t(hi_it - lo_it);
+    }
+    expected_counts.push_back(cnt);
+  }
+
+  // Shuffle
+  std::vector<uint32_t> perm(n);
+  std::iota(perm.begin(), perm.end(), 0);
+  std::shuffle(perm.begin(), perm.end(), std::mt19937{2});
+  std::vector<std::string> sp; std::vector<uint32_t> sc;
+  sp.reserve(n); sc.reserve(n);
+  for (auto idx : perm) { sp.push_back(prefix_q[idx]); sc.push_back(expected_counts[idx]); }
+  prefix_q = std::move(sp); expected_counts = std::move(sc);
+
+  printf("Querying prefix_count...\n");
+  start = std::chrono::high_resolution_clock::now();
+  query_trie_prefix<trie_t>(prefix_q, expected_counts, trie);
+  end = std::chrono::high_resolution_clock::now();
+  auto duration = (end - start).count();
+  double avg_latency = (double)duration/n;
+  printf("Done!\n");
+  printf("total time: %lf ms, avg latency: %lf ns\n", (double)duration/1000000, avg_latency);
+  trie.print_space_cost_breakdown();
   printf("%lf,%lf,%lf\n", build_time, size_in_mb, avg_latency);
   printf("[PASSED]\n");
 }
@@ -632,6 +984,72 @@ int main(int argc, char *argv[]) {
     compare_louds_marisa(argv[1], max_recursion, mask);
     break;
   #endif
+   // Successor queries
+   case 13:
+    printf("[SUCCESSOR C2-FST]\n");
+    test_trie_successor<FstCCWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 14:
+    printf("[SUCCESSOR C2-CoCo(LOUDS-Sparse)]\n");
+    test_trie_successor<CoCoLSWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 15:
+    printf("[SUCCESSOR C2-MARISA]\n");
+    test_trie_successor<MarisaCCWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 16:
+    printf("[SUCCESSOR FST]\n");
+    test_trie_successor<FstWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 17:
+    printf("[SUCCESSOR COCO (sorted-keys binary search)]\n");
+    test_trie_successor<CoCoWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 18:
+    printf("[SUCCESSOR MARISA (sorted-keys binary search)]\n");
+    test_trie_successor<MarisaWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   // Range count queries
+   case 19:
+    printf("[RANGE_COUNT C2-FST]\n");
+    test_trie_range<FstCCWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 20:
+    printf("[RANGE_COUNT C2-CoCo(LOUDS-Sparse)]\n");
+    test_trie_range<CoCoLSWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 21:
+    printf("[RANGE_COUNT C2-MARISA]\n");
+    test_trie_range<MarisaCCWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 22:
+    printf("[RANGE_COUNT FST]\n");
+    test_trie_range<FstWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 23:
+    printf("[RANGE_COUNT COCO (sorted-keys binary search)]\n");
+    test_trie_range<CoCoWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 24:
+    printf("[RANGE_COUNT MARISA (sorted-keys binary search)]\n");
+    test_trie_range<MarisaWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 25:
+    printf("[RANGE_COUNT C2-FST (sorted-keys binary search)]\n");
+    test_trie_range<FstCCWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 26:
+    printf("[RANGE_COUNT FST (sorted-keys binary search)]\n");
+    test_trie_range<FstWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 27:
+    printf("[PREFIX_COUNT C2-FST]\n");
+    test_trie_prefix<FstCCWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 28:
+    printf("[PREFIX_COUNT FST]\n");
+    test_trie_prefix<FstWrapper>(argv[1], space_relaxation, max_recursion, mask);
+    break;
    default:
     printf("unrecognized index; stopped\n");
   }

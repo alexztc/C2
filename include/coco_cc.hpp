@@ -415,6 +415,112 @@ class CoCoCC {
     }
   }
 
+  // Returns the leaf_id of the smallest key >= `key`.  Only implemented for LoudsSparseCC.
+  // Returns uint32_t(-1) if no such key exists.
+  auto seek(const key_type &key) const -> uint32_t {
+    static_assert(std::is_same_v<topo_t, LoudsSparseCC>,
+                  "seek() is only implemented for LoudsSparseCC topology");
+    uint32_t len = key.size();
+    uint32_t pos = 0;  // first slot of root macro-node
+    uint32_t matched_len = 0;
+    std::vector<uint32_t> stk;  // stack of taken slots for backtracking
+
+    while (true) {
+      uint32_t macro_id = topo_.node_id(pos);
+      succinct::bit_vector::enumerator it(macros_, ptrs_[macro_id]);
+      size_t next_ptr = ptrs_[macro_id + 1];
+      encoding_t encoding = static_cast<encoding_t>(it.take(encoding_bits_));
+      Alphabet remap;
+
+      bool prefix_key = it.take(1);
+      if (matched_len >= len) {
+        if (prefix_key) return topo_.leaf_id(pos);    // exact match (prefix key in trie)
+        return get_min_leaf_from_slot(pos);            // query is a prefix of trie keys
+      }
+
+      uint32_t depth = it.take(depth_bits_) + 1;
+      if (!is_legal(key, matched_len, depth)) {
+        return get_min_leaf_from_slot(pos + prefix_key);  // first regular child
+      }
+
+      bool is_remap = (static_cast<int>(encoding) & 0x4);
+      code_t first_code, code;
+      if (!is_remap) {
+        code = encode(key, matched_len, depth);
+        first_code = it.take(optimizer_t::code_len(alphabet_, depth));
+      } else {
+        read_alphabet(it, remap);
+        code = encode_safe(key, matched_len, depth, remap);
+        first_code = it.take(optimizer_t::code_len(remap, depth));
+      }
+
+      uint32_t degree = topo_.node_degree(pos);
+
+      if (code < first_code) {
+        // All codes in macro-node > query code; first regular child is the successor
+        return get_min_leaf_from_slot(pos + prefix_key);
+      }
+
+      uint32_t child_id;
+      code_t lower_bound;
+      if (code == first_code) {
+        child_id = prefix_key;
+        lower_bound = first_code;
+      } else {
+        code_t target = code - first_code - 1;
+        std::pair<uint32_t, code_t> lb;
+        switch (encoding) {
+         case encoding_t::ELIAS_FANO: case encoding_t::EF_REMAP:
+          lb = lower_bound_elias_fano(it, next_ptr, degree - prefix_key - 1, target); break;
+         case encoding_t::PACKED: case encoding_t::PA_REMAP:
+          lb = lower_bound_packed(it, next_ptr, degree - prefix_key - 1, target); break;
+         case encoding_t::BITVECTOR: case encoding_t::BV_REMAP:
+          lb = lower_bound_bitvector(it, next_ptr, degree - prefix_key - 1, target); break;
+         case encoding_t::DENSE: case encoding_t::DE_REMAP:
+          lb = lower_bound_dense(it, next_ptr, degree - prefix_key - 1, target); break;
+         default: assert(false);
+        }
+        // When lb.first == uint32_t(-1), unsigned overflow gives child_id = prefix_key and
+        // lower_bound = first_code < code, which falls through to the "code > lower_bound" branch below.
+        child_id = lb.first + 1 + prefix_key;
+        lower_bound = lb.second + 1 + first_code;
+      }
+
+      if (code == lower_bound) {
+        // Exact macro-code match; descend or handle leaf
+        if (topo_.has_child(pos + child_id)) {
+          stk.push_back(pos + child_id);
+          matched_len += depth;
+          pos = topo_.child_pos(pos + child_id);
+          continue;
+        }
+        // Leaf slot
+        uint32_t leaf_id = topo_.leaf_id(pos + child_id);
+        if (is_link_.get(leaf_id)) {
+          return leaf_id;  // string-pool suffix; wrapper verifies >= key
+        }
+        uint32_t prefix_len = is_prefix(lower_bound, code, depth, is_remap ? remap : alphabet_);
+        matched_len += (prefix_len == uint32_t(-1)) ? depth : prefix_len;
+        if (matched_len >= key.size()) return leaf_id;  // exact match or key exhausted
+        // Trie key shorter than query; try next slot (sibling in same macro-node)
+        uint32_t succ = child_id + 1;
+        if (succ < degree) return get_min_leaf_from_slot(pos + succ);
+      } else {
+        // code > lower_bound: last slot with code <= query is child_id; next slot is the successor
+        uint32_t succ = child_id + 1;
+        if (succ < degree) return get_min_leaf_from_slot(pos + succ);
+      }
+
+      // Backtrack via stack: find next sibling in a parent macro-node
+      while (!stk.empty()) {
+        uint32_t parent_slot = stk.back(); stk.pop_back();
+        uint32_t parent_end = topo_.node_end(parent_slot);
+        if (parent_slot + 1 < parent_end) return get_min_leaf_from_slot(parent_slot + 1);
+      }
+      return uint32_t(-1);
+    }
+  }
+
   auto encoding_size() const -> size_t {
     return macros_.size();
   }
@@ -730,6 +836,11 @@ class CoCoCC {
       return depth - padded_len;
     }
     return -1;
+  }
+
+  auto get_min_leaf_from_slot(uint32_t s) const -> uint32_t {
+    while (topo_.has_child(s)) s = topo_.child_pos(s);
+    return topo_.leaf_id(s);
   }
 
   Alphabet alphabet_;

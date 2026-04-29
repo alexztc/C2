@@ -69,6 +69,23 @@ class Trie {
 
     position_t exactSearch(const std::string& key) const;
 
+    // Trie-native prefix count: DFS subtree leaf counting (correct with suffix compression).
+    position_t prefixCount(const std::string& prefix) const {
+        auto [val, level] = louds_sparse_->navigatePrefix(prefix, /*in_node_num=*/0);
+        if (val == kNotFound) return 0;
+        if (val & 0x80000000u) {
+            // prefix fully consumed at node (val & 0x7fffffffu)
+            return louds_sparse_->countSubtreeLeaves(val & 0x7fffffffu);
+        }
+        // mid-prefix leaf: val = key_id; check that suffix begins with prefix[level..]
+        position_t suf_pos = suffix_ptrs_[val];
+        for (level_t l = level; l < (level_t)prefix.length(); l++) {
+            if (suffixes_[suf_pos] == '\0' || suffixes_[suf_pos] != prefix[l]) return 0;
+            suf_pos++;
+        }
+        return 1;
+    }
+
     uint64_t getSizeIO() const;
     uint64_t getMemoryUsage() const;
 

@@ -178,6 +178,45 @@ class LoudsSparse {
         }
         return {kNotFound, level_t(key.length())};
     }
+    // Navigate the trie following `prefix`. Used by Trie::prefixCount.
+    // Encoding of the returned pair (val, level):
+    //   val == kNotFound              → prefix char missing at `level`
+    //   val & 0x80000000u, val!=kNotFound → prefix fully consumed at node (val & 0x7fffffffu)
+    //   otherwise                     → mid-prefix leaf; val = key_id; caller checks suffix[level..]
+    std::pair<position_t, level_t> navigatePrefix(const std::string& prefix, const position_t in_node_num) const {
+        position_t node_num = in_node_num;
+        position_t pos = getFirstLabelPos(node_num);
+        level_t level = start_level_;
+        for (; level < (level_t)prefix.length(); level++) {
+            if (!labels_->search((label_t)prefix[level], pos, nodeSize(pos)))
+                return {kNotFound, level};
+            if (!child_indicator_bits_->readBit(pos))
+                return {getSuffixPos(pos) + value_count_dense_, (level_t)(level + 1)};
+            node_num = getChildNodeNum(pos);
+            pos = getFirstLabelPos(node_num);
+        }
+        return {0x80000000u | node_num, level};
+    }
+
+    position_t countSubtreeLeaves(const position_t node_num) const {
+        position_t count = 0;
+        position_t first = getFirstLabelPos(node_num);
+        position_t last  = getLastLabelPos(node_num);
+        for (position_t p = first; p <= last; p++) {
+            if (!child_indicator_bits_->readBit(p)) {
+                count++;
+            } else {
+                count += countSubtreeLeaves(getChildNodeNum(p));
+            }
+        }
+        return count;
+    }
+
+    // Legacy entry point kept for prefixCount in Trie.
+    position_t prefixCountLeaves(const std::string& key, const position_t in_node_num) const {
+        return 0;  // unused; Trie::prefixCount uses navigatePrefix directly
+    }
+
     void debugPrint(std::ostream& os) const {
         os << "-- LoudsSparse --\n";
         os << "LABEL: ";

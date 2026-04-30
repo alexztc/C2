@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY="${SCRIPT_DIR}/build/benchmark"
 DATASET_DIR="${SCRIPT_DIR}/example_dataset"
+FULL_DATASET_DIR="${SCRIPT_DIR}/full_dataset"
 RESULTS_DIR="${SCRIPT_DIR}/results"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RESULTS_FILE="${RESULTS_DIR}/benchmark_${TIMESTAMP}.csv"
@@ -12,12 +13,12 @@ RESULTS_FILE="${RESULTS_DIR}/benchmark_${TIMESTAMP}.csv"
 # Dataset paths (set to empty string "" to skip)
 # ---------------------------------------------------------------------------
 declare -A DATASETS=(
-    [words]="${DATASET_DIR}/words-470k.txt"
-    [url]=""
-    [dna]="${DATASET_DIR}/dna-31-mer.txt.small"
-    [xml]="${DATASET_DIR}/dblp.xml.200MB_sorted.small"
-    [wiki]="${DATASET_DIR}/enwiki-ns0-ascii.small"
-    [log]="${DATASET_DIR}/access_log.txt.small"
+    [words]="${FULL_DATASET_DIR}/words/words-470k.txt"
+    [url]="${FULL_DATASET_DIR}/url/uk-2014-tpd_sorted.ids"
+    [dna]="${FULL_DATASET_DIR}/dna/dna100_31mers_sorted.txt"
+    [xml]="${FULL_DATASET_DIR}/xml/dblp.xml.200MB_sorted"
+    [wiki]="${FULL_DATASET_DIR}/wiki/enwiki-ns0-ascii.txt"
+    [log]="${FULL_DATASET_DIR}/log/access_log_common_sorted.txt"
 )
 
 # Column order matching the paper table

@@ -17,9 +17,9 @@ class MarisaWrapper {  // unified API
     for (const auto &key : keys) {
       keyset.push_back(key.c_str());
     }
-    // trie_.build(keyset, (max_recursion + 1) | marisa::CacheLevel::MARISA_DEFAULT_CACHE);
+    trie_.build(keyset, (max_recursion + 1) | marisa::CacheLevel::MARISA_DEFAULT_CACHE);
     // trie_.build(keyset, (max_recursion + 1) | marisa::CacheLevel::MARISA_LARGE_CACHE);
-    trie_.build(keyset, (max_recursion + 1) | marisa::CacheLevel::MARISA_HUGE_CACHE);
+    // trie_.build(keyset, (max_recursion + 1) | marisa::CacheLevel::MARISA_HUGE_CACHE);
   }
 
   __NOINLINE_IF_PROFILE auto lookup(const std::string &key) const -> uint32_t {

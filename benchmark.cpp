@@ -22,6 +22,15 @@
 #include <random>
 #include <unordered_set>
 
+#ifdef __PROFILE__
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <asm/unistd.h>
+#include <cerrno>
+#include <cstring>
+#endif
+
 
 // #define __CORRECTNESS_TEST__
 
@@ -207,9 +216,53 @@ void __attribute__((noinline)) test_trie(const char *filename, uint32_t space_re
 #endif
   std::shuffle(keys.begin(), keys.end(), std::mt19937{2});
   printf("Querying trie...\n");
+#ifdef __PROFILE__
+  // Warmup pass: bring hot trie blocks into cache before counting misses
+  query_trie<trie_t>(keys, trie);
+  printf("Warmup done. Starting LLC miss measurement...\n");
+
+  // Prefer the precise LLC read-miss event; fall back to the generic hardware
+  // cache-miss counter (which maps to LLC misses on most x86 PMUs) if the
+  // precise event is unavailable (e.g. in virtualised environments)
+  struct perf_event_attr pe{};
+  pe.size           = sizeof(pe);
+  pe.disabled       = 1;
+  pe.exclude_kernel = 1;
+  pe.exclude_hv     = 1;
+  pe.type   = PERF_TYPE_HW_CACHE;
+  pe.config = PERF_COUNT_HW_CACHE_LL
+            | (PERF_COUNT_HW_CACHE_OP_READ    << 8)
+            | (PERF_COUNT_HW_CACHE_RESULT_MISS << 16);
+  int perf_fd = (int)syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
+  if (perf_fd < 0) {
+    pe.type   = PERF_TYPE_HARDWARE;
+    pe.config = PERF_COUNT_HW_CACHE_MISSES;
+    perf_fd   = (int)syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
+    if (perf_fd < 0) {
+      fprintf(stderr, "perf_event_open failed: %s (check /proc/sys/kernel/perf_event_paranoid <= 2)\n",
+              strerror(errno));
+    } else {
+      fprintf(stderr, "Note: LLC-specific event unavailable; using PERF_COUNT_HW_CACHE_MISSES\n");
+    }
+  }
+  if (perf_fd >= 0) {
+    ioctl(perf_fd, PERF_EVENT_IOC_RESET, 0);
+    ioctl(perf_fd, PERF_EVENT_IOC_ENABLE, 0);
+  }
+#endif
   start = std::chrono::high_resolution_clock::now();
   query_trie<trie_t>(keys, trie);
   end = std::chrono::high_resolution_clock::now();
+#ifdef __PROFILE__
+  if (perf_fd >= 0) {
+    ioctl(perf_fd, PERF_EVENT_IOC_DISABLE, 0);
+    long long cache_miss_count = 0;
+    read(perf_fd, &cache_miss_count, sizeof(cache_miss_count));
+    close(perf_fd);
+    printf("query cache-misses: %lld\n", cache_miss_count);
+    printf("misses/query: %.1f\n", (double)cache_miss_count / keys.size());
+  }
+#endif
   duration = (end - start).count();
   double avg_latency = (double)duration/keys.size();
   printf("Done!\n");

@@ -35,7 +35,7 @@ class MarisaCC : public StringPool<Key> {
 #ifdef __ENABLE_CACHE__
   // static constexpr uint32_t cache_ratio_ = 128;  // MARISA_HUGE_CACHE
   // static constexpr uint32_t cache_ratio_ = 256;  // MARISA_LARGE_CACHE
-  static constexpr uint32_t cache_ratio_ = 512;  // MARISA_DEFAULT_CACHE
+  static constexpr uint32_t cache_ratio_ = 512;  // MARISA_DEFAULT_CACHE — matches baseline MarisaWrapper
 #endif
 
   void print_space_cost_breakdown() const {

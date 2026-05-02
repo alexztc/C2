@@ -84,6 +84,8 @@ class Trie {
 
     void debugPrint(std::ostream& os) const;
 
+    const surf::LoudsSparse* get_louds_sparse() const { return louds_sparse_.get(); }
+
   private:
     std::pair<position_t, level_t> traverse(const std::string& key) const;
 

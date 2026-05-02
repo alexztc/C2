@@ -178,6 +178,18 @@ class LoudsSparse {
         }
         return {kNotFound, level_t(key.length())};
     }
+    // Bitvector accessors for microbenchmarking (tab:trie-op)
+    bool readChildBit(position_t pos) const { return child_indicator_bits_->readBit(pos); }
+    bool readLoudsBit(position_t pos) const { return louds_bits_->readBit(pos); }
+    position_t leafId(position_t pos) const { return pos - child_indicator_bits_->rank(pos); }
+    position_t nodeSizePub(position_t pos) const { return nodeSize(pos); }
+    // full child navigation: rank on child_indicator + select on louds (matches C2-FST child_pos)
+    position_t childPosPub(position_t pos) const {
+        position_t node_num = getChildNodeNum(pos);
+        return getFirstLabelPos(node_num);
+    }
+    position_t numBits() const { return child_indicator_bits_->numBits(); }
+
     void debugPrint(std::ostream& os) const {
         os << "-- LoudsSparse --\n";
         os << "LABEL: ";

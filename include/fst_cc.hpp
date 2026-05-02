@@ -1,5 +1,7 @@
 #pragma once
 
+#define __COMPARE_FST__
+
 #include "utils.hpp"
 #include "static_vector.hpp"
 #include "louds_sparse_cc.hpp"
@@ -32,6 +34,41 @@ class FstCC {
     size_t data = labels_.size_in_bits();
     next_->space_cost_breakdown(topo, link, data);
     printf("topology: %lf MB, link: %lf MB, data: %lf MB\n", (double)topo/mb_bits, (double)link/mb_bits, (double)data/mb_bits);
+  }
+
+  // FST distinguishes two kinds of unary paths:
+  //   shared: multiple keys share a common prefix extension → kept in main trie char-by-char
+  //   terminal: only one key remains (unique suffix) → may be compressed if len >= link_cutoff_
+  struct UnaryPathStats {
+    uint64_t num_shared_steps{0};   // individual char-steps through shared unary extensions
+    uint64_t num_inplace_term{0};   // short terminal suffixes (len < link_cutoff_), kept in trie
+    uint64_t total_inplace_len{0};
+    uint64_t num_links{0};          // long terminal suffixes (len >= link_cutoff_), compressed
+    uint64_t total_link_len{0};
+    uint64_t max_link_len{0};
+    std::vector<uint64_t> len_hist;  // len_hist[i] = # links with length (link_cutoff_ + i)
+  };
+
+  void print_unary_path_stats() const {
+    printf("--- Unary Path Analysis (FST, cutoff=%u) ---\n", link_cutoff_);
+    printf("  shared unary steps in main trie: %llu\n", stats_.num_shared_steps);
+    printf("  terminal suffixes: inplace=%llu (avg len=%.2f)  links=%llu (%.1f%% of terminal)\n",
+           stats_.num_inplace_term,
+           stats_.num_inplace_term > 0 ? (double)stats_.total_inplace_len / stats_.num_inplace_term : 0.0,
+           stats_.num_links,
+           (stats_.num_links + stats_.num_inplace_term) > 0
+               ? 100.0 * stats_.num_links / (stats_.num_links + stats_.num_inplace_term) : 0.0);
+    if (stats_.num_links > 0) {
+      printf("  link len: avg=%.2f  max=%llu  total_chars=%llu\n",
+             (double)stats_.total_link_len / stats_.num_links,
+             stats_.max_link_len, stats_.total_link_len);
+      printf("  link length distribution (len:count):");
+      for (size_t i = 0; i < stats_.len_hist.size(); i++) {
+        if (stats_.len_hist[i] > 0)
+          printf("  %u:%llu", (uint32_t)(link_cutoff_ + i), stats_.len_hist[i]);
+      }
+      printf("\n");
+    }
   }
 
  public:
@@ -343,6 +380,9 @@ class FstCC {
   auto trie_size_in_bits() const -> size_t {
     return (labels_.size_in_bytes() + topo_.size_in_bytes() + is_link_.size_in_bytes()) * 8;
   }
+
+  auto get_topo() const -> const topo_t* { return &topo_; }
+
  private:
   void build(const KeySet<key_type> &key_set, bool temp = false,
              int max_recursion = 0, int mask = 0) {
@@ -381,20 +421,32 @@ class FstCC {
 
       if (range.lcp_ > 0) {
         labels_.emplace_back(key_set.get_label(range.begin_, range.depth_));
-        if (!is_same_key(range)) {  // not a suffix
+        if (!is_same_key(range)) {  // not a suffix: shared unary path, kept char-by-char in main trie
+          stats_.num_shared_steps++;
           SET_BIT(has_child[0], 0);
           topo_.add_node(has_child, 1);
           queue.push(Range(range.begin_, range.end_, range.depth_ + 1, range.lcp_ - 1));
         } else if (range.lcp_ < link_cutoff_) {  // in place
-          if (range.lcp_ == 1) {  // last label
+          if (range.lcp_ == 1) {  // last label of short terminal suffix
+            stats_.num_inplace_term++;
+            stats_.total_inplace_len += 1;
             topo_.add_node(has_child, 1);
             is_link_.append0();
-          } else {  // not last label
+          } else {  // not last label: continuation of short terminal suffix
+            stats_.total_inplace_len++;
             SET_BIT(has_child[0], 0);
             topo_.add_node(has_child, 1);
             queue.push(Range(range.begin_, range.end_, range.depth_ + 1, range.lcp_ - 1));
           }
-        } else {  // link
+        } else {  // link: long terminal suffix, compressed to string pool
+          uint32_t link_len = range.lcp_ - 1;  // first char stored in main trie, rest in pool
+          stats_.num_links++;
+          stats_.total_link_len += link_len;
+          if (link_len > stats_.max_link_len) stats_.max_link_len = link_len;
+          uint32_t bucket = range.lcp_ - link_cutoff_;  // bucket by full lcp (including first char)
+          if (bucket >= (uint32_t)stats_.len_hist.size())
+            stats_.len_hist.resize(bucket + 1, 0);
+          stats_.len_hist[bucket]++;
           topo_.add_node(has_child, 1);
           is_link_.append1();
           suffixes.emplace_back(key_set[range.begin_].key_, range.depth_ + 1, range.lcp_ - 1);
@@ -458,6 +510,8 @@ class FstCC {
   bitvec_t is_link_;
 
   strpool_t *next_{nullptr};
+
+  UnaryPathStats stats_;
 
   friend class walker;
   template <typename K> friend class CoCoOptimizer;

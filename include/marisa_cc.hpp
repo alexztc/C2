@@ -44,6 +44,42 @@ class MarisaCC : public StringPool<Key> {
     printf("topology: %lf MB, link: %lf MB, data: %lf MB\n", (double)topo/mb_bits, (double)link/mb_bits, (double)data/mb_bits);
   }
 
+  struct UnaryPathStats {
+    uint64_t num_single{0};       // path_len == 1: plain branching label, no unary extension
+    uint64_t num_short{0};        // 1 < path_len < link_cutoff_: unary path too short to compress
+    uint64_t total_short_len{0};
+    uint64_t num_links{0};        // path_len >= link_cutoff_: compressed to string pool
+    uint64_t total_link_len{0};
+    uint64_t max_link_len{0};
+    std::vector<uint64_t> len_hist;  // len_hist[i] = # links with length (link_cutoff_ + i)
+  };
+
+  void print_unary_path_stats() const {
+    if constexpr (reverse_) return;
+    uint64_t total = stats_.num_single + stats_.num_short + stats_.num_links;
+    if (total == 0) return;
+    printf("--- Unary Path Analysis (Marisa, cutoff=%u) ---\n", link_cutoff_);
+    printf("  branches: %llu  |  single-char: %llu (%.1f%%)  short-unary: %llu (%.1f%%)  links: %llu (%.1f%%)\n",
+           total,
+           stats_.num_single, 100.0 * stats_.num_single / total,
+           stats_.num_short,  100.0 * stats_.num_short  / total,
+           stats_.num_links,  100.0 * stats_.num_links  / total);
+    if (stats_.num_links > 0) {
+      printf("  link len: avg=%.2f  max=%llu  total_chars=%llu\n",
+             (double)stats_.total_link_len / stats_.num_links,
+             stats_.max_link_len, stats_.total_link_len);
+      printf("  link length distribution (len:count):");
+      for (size_t i = 0; i < stats_.len_hist.size(); i++) {
+        if (stats_.len_hist[i] > 0)
+          printf("  %u:%llu", (uint32_t)(link_cutoff_ + i), stats_.len_hist[i]);
+      }
+      printf("\n");
+    }
+    if (stats_.num_short > 0) {
+      printf("  short unary avg len: %.2f\n", (double)stats_.total_short_len / stats_.num_short);
+    }
+  }
+
  private:
   struct Range {
     uint32_t begin_{0};
@@ -376,6 +412,24 @@ class MarisaCC : public StringPool<Key> {
           }
         }
 
+        if constexpr (!reverse_) {
+          uint32_t path_len = depth - range.depth_;
+          if (path_len < 2) {
+            stats_.num_single++;
+          } else if (path_len < link_cutoff_) {
+            stats_.num_short++;
+            stats_.total_short_len += path_len;
+          } else {
+            stats_.num_links++;
+            stats_.total_link_len += path_len;
+            if (path_len > stats_.max_link_len) stats_.max_link_len = path_len;
+            uint32_t bucket = path_len - link_cutoff_;
+            if (bucket >= (uint32_t)stats_.len_hist.size())
+              stats_.len_hist.resize(bucket + 1, 0);
+            stats_.len_hist[bucket]++;
+          }
+        }
+
         if (depth - range.depth_ >= link_cutoff_) {  // link
           if constexpr (!reverse_) {
           #ifdef __NO_BRANCHING_LABEL__
@@ -555,6 +609,7 @@ class MarisaCC : public StringPool<Key> {
   label_vec labels_;
   sdsl::int_vector<> links_;
   strpool_t *next_{nullptr};
+  UnaryPathStats stats_;
 
 #ifdef __ENABLE_CACHE__
   std::vector<Cache> cache_;

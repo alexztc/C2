@@ -26,8 +26,16 @@ class LoudsCC {
        * spilled - bits 0-30: spill index (only half the bits are 0, so no overflow)
        */
       uint32_t select0_;
-      uint8_t subrank_[4];  // accumulative rank1 before each uint64_t element
-      uint64_t bits_[4];     // 256 actual bits
+      uint8_t subrank_[4];    // accumulative rank1 before each uint64_t element
+      uint8_t subrank00_[4];  // accumulative rank00 before each uint64_t element (block-relative)
+      /** carries_ packs 4 carry bits into one byte:
+       *  bit 0: carry into bits_[0] (= MSB of previous block's bits_[3])
+       *  bit i (i=1,2,3): carry into bits_[i] (= MSB of bits_[i-1])
+       *  used by rank00(size) to avoid loading bits_[word-1] entirely
+       */
+      uint8_t carries_;
+      uint8_t _pad[3];
+      uint64_t bits_[4];      // 256 actual bits
 
       auto build_index() -> uint32_t {
         uint32_t subrank = 0;
@@ -36,6 +44,17 @@ class LoudsCC {
           subrank += __builtin_popcountll(bits_[i]);
         }
         return subrank;
+      }
+
+      auto build_subrank00(bool prev) -> void {
+        carries_ = prev;  // bit 0: carry into word 0
+        uint32_t acc = 0;
+        for (int i = 0; i < 4; i++) {
+          subrank00_[i] = acc;
+          acc += rank00ll(bits_[i], prev);
+          prev = (bits_[i] >> 63);
+          if (i < 3) carries_ |= (prev << (i + 1));  // bits 1-3: carries into words 1-3
+        }
       }
 
       auto get(uint32_t pos) const -> bool {
@@ -60,13 +79,17 @@ class LoudsCC {
 
       auto rank00(uint32_t size, bool prev) const -> uint32_t {
         assert(size < 256);
-        uint32_t ret = 0;
-        for (int i = 0; i < size / 64; i++) {  // maybe make branchless?
-          ret += rank00ll(bits_[i], prev);
-          prev = (bits_[i] >> 63);
-        }
-        ret += rank00ll(bits_[size/64] | ~MASK(size%64), prev);
-        return ret;
+        uint32_t word = size / 64;
+        bool carry = (word > 0) ? (bool)(bits_[word - 1] >> 63) : prev;
+        return subrank00_[word] + rank00ll(bits_[word] | ~MASK(size % 64), carry);
+      }
+
+      // fast path: all data from this block only, no cross-block or cross-word loads
+      auto rank00(uint32_t size) const -> uint32_t {
+        assert(size < 256);
+        uint32_t word = size / 64;
+        bool carry = (carries_ >> word) & 1;
+        return subrank00_[word] + rank00ll(bits_[word] | ~MASK(size % 64), carry);
       }
 
       auto select0(uint32_t rank) const -> uint32_t {
@@ -84,7 +107,7 @@ class LoudsCC {
           }
         }
       }
-    };  // 48 bytes
+    };  // 56 bytes
 
     Block *blocks_{nullptr};
 
@@ -193,6 +216,7 @@ class LoudsCC {
       }
       for (uint32_t i = 0; i < 4; i++) {
         blocks_[capacity_/256].subrank_[i] = 0;
+        blocks_[capacity_/256].subrank00_[i] = 0;
       }
 
       rank1_ = rank00_ = 0;
@@ -203,6 +227,7 @@ class LoudsCC {
         rank1_ += block_rank1;
 
         blocks_[i].rank00_ = rank00_;
+        blocks_[i].build_subrank00(prev);
         rank00_ += blocks_[i].rank00(prev);
         prev = blocks_[i].bits_[3] >> 63;
       }
@@ -240,9 +265,7 @@ class LoudsCC {
     auto rank00(uint32_t size) const -> uint32_t {
       assert(size <= size_);
       const auto &block = blocks_[size / 256];
-      bool prev = (size >= 256 && (blocks_[size/256 - 1].bits_[3] >> 63));
-      uint32_t ret = block.rank00_ + block.rank00(size % 256, prev);
-      return ret;
+      return block.rank00_ + block.rank00(size % 256);  // uses precomputed carry_
     }
 
     // return the position of the closest 0 bit after position `pos` (inclusive)

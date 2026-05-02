@@ -55,6 +55,10 @@ class FstCCWrapper {  // unified API
   void print_space_cost_breakdown() const {
     trie_.print_space_cost_breakdown();
   }
+
+  void print_unary_path_stats() const {
+    trie_.print_unary_path_stats();
+  }
  private:
   trie_t trie_;
 };
@@ -147,6 +151,10 @@ class MarisaCCWrapper {  // unified API
 
   void print_space_cost_breakdown() const {
     trie_.print_space_cost_breakdown();
+  }
+
+  void print_unary_path_stats() const {
+    trie_.print_unary_path_stats();
   }
  private:
   trie_t trie_;
@@ -268,6 +276,9 @@ void __attribute__((noinline)) test_trie(const char *filename, uint32_t space_re
   printf("Done!\n");
   printf("total time: %lf ms, avg latency: %lf ns\n", (double)duration/1000000, avg_latency);
   trie.print_space_cost_breakdown();
+  if constexpr (requires { trie.print_unary_path_stats(); }) {
+    trie.print_unary_path_stats();
+  }
 
   printf("%lf,%lf,%lf\n", build_time, size_in_mb, avg_latency);
   printf("[PASSED]\n");
@@ -333,6 +344,15 @@ void compare_louds_coco(const std::string &filename, uint32_t space_relaxation, 
     }
   }
 
+  // all positions (for GET test)
+  std::vector<uint32_t> all_louds_pos, all_sparse_pos;
+  all_louds_pos.reserve(bv_size);
+  for (uint32_t i = 0; i < bv_size; i++) all_louds_pos.push_back(i);
+  all_sparse_pos.reserve(topo_ls->size());
+  for (uint32_t i = 0; i < topo_ls->size(); i++) all_sparse_pos.push_back(i);
+
+  std::shuffle(all_louds_pos.begin(), all_louds_pos.end(), std::mt19937{0});
+  std::shuffle(all_sparse_pos.begin(), all_sparse_pos.end(), std::mt19937{0});
   std::shuffle(leaves[0].begin(), leaves[0].end(), std::mt19937{1});
   std::shuffle(leaves[1].begin(), leaves[1].end(), std::mt19937{1});
   std::shuffle(internals[0].begin(), internals[0].end(), std::mt19937{2});
@@ -340,7 +360,26 @@ void compare_louds_coco(const std::string &filename, uint32_t space_relaxation, 
   std::shuffle(child_query[0].begin(), child_query[0].end(), std::mt19937{3});
   std::shuffle(child_query[1].begin(), child_query[1].end(), std::mt19937{3});
 
-  size_t leaf_id_time[3], internal_id_time[3], degree_time[3], child_pos_time[3];
+  size_t get_time[3], leaf_id_time[3], internal_id_time[3], degree_time[3], child_pos_time[3];
+
+  printf("[GET]...\n");
+  {
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (auto i : all_louds_pos) { volatile auto r = topo->get(i); }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    get_time[0] = (t1 - t0).count();
+    t0 = std::chrono::high_resolution_clock::now();
+    for (auto i : all_louds_pos) { volatile auto r = louds->get(i); }
+    t1 = std::chrono::high_resolution_clock::now();
+    get_time[1] = (t1 - t0).count();
+    t0 = std::chrono::high_resolution_clock::now();
+    for (auto i : all_sparse_pos) {
+      volatile auto r0 = topo_ls->has_child(i);
+      volatile auto r1 = topo_ls->louds(i);
+    }
+    t1 = std::chrono::high_resolution_clock::now();
+    get_time[2] = (t1 - t0).count();
+  }
 
   printf("[LEAF ID]...\n");
   auto start = std::chrono::high_resolution_clock::now();
@@ -430,6 +469,9 @@ void compare_louds_coco(const std::string &filename, uint32_t space_relaxation, 
   end = std::chrono::high_resolution_clock::now();
   child_pos_time[2] = (end - start).count();
 
+  // order: C2-CoCo(LoudsCC) | CoCo'(LoudsSux) | C2-FST(LoudsSparseCC)
+  printf("GET(ns): %lf vs %lf vs %lf\n", (double)get_time[0]/all_louds_pos.size(),
+         (double)get_time[1]/all_louds_pos.size(), (double)get_time[2]/all_sparse_pos.size());
   printf("LEAF_ID(ns): %lf vs %lf vs %lf\n", (double)leaf_id_time[0]/leaves[0].size(),
          (double)leaf_id_time[1]/leaves[0].size(), (double)leaf_id_time[2]/leaves[1].size());
   printf("INTERNAL_ID(ns): %lf vs %lf vs %lf\n", (double)internal_id_time[0]/internals[0].size(),
@@ -439,6 +481,147 @@ void compare_louds_coco(const std::string &filename, uint32_t space_relaxation, 
   printf("CHILD_POS(ns): %lf vs %lf vs %lf\n", (double)child_pos_time[0]/child_query[0].size(),
          (double)child_pos_time[1]/child_query[0].size(), (double)child_pos_time[2]/child_query[1].size());
 
+  printf("Done!\n");
+}
+#endif
+
+#ifdef __COMPARE_FST__
+// Baseline LOUDS-sparse: same bit content as LoudsSparseCC but stored in two
+// separate bitvectors using SuRF's original BitvectorRank (child_indicator) +
+// BitvectorSelect (louds_bits) — the actual structures from the original paper.
+struct LoudsSparseBaseline {
+  std::unique_ptr<surf::BitvectorRank>   child_rank;    // has_child with rank LUT
+  std::unique_ptr<surf::BitvectorSelect> louds_select;  // louds with select LUT
+
+  void build(const c2::LoudsSparseCC *topo) {
+    uint32_t n = topo->size();
+    uint32_t num_words = (n + 63) / 64;
+    std::vector<surf::word_t> child_words(num_words, 0);
+    std::vector<surf::word_t> louds_words(num_words, 0);
+    // SuRF stores bits MSB-first within each 64-bit word
+    for (uint32_t i = 0; i < n; i++) {
+      if (topo->has_child(i)) child_words[i / 64] |= (surf::word_t(1) << (63 - i % 64));
+      if (topo->louds(i))     louds_words[i / 64] |= (surf::word_t(1) << (63 - i % 64));
+    }
+    std::vector<std::vector<surf::word_t>> child_bpl = {std::move(child_words)};
+    std::vector<std::vector<surf::word_t>> louds_bpl = {std::move(louds_words)};
+    std::vector<surf::position_t> nbpl = {n};
+    child_rank   = std::make_unique<surf::BitvectorRank>(512, child_bpl, nbpl, 0, 1);
+    louds_select = std::make_unique<surf::BitvectorSelect>(64,  louds_bpl, nbpl, 0, 1);
+  }
+
+  // get: readBit from two separate allocations (two cache-line misses)
+  void get(uint32_t i) const {
+    volatile bool r0 = child_rank->readBit(i);
+    volatile bool r1 = louds_select->readBit(i);
+  }
+
+  // leaf_id: rank0 on child; called with has_child[i]=0, so rank(i)=rank(i-1)
+  uint32_t leaf_id(uint32_t i) const {
+    return i - child_rank->rank(i);
+  }
+
+  // degree: distance to next louds=1 bit (mirrors SuRF's nodeSize implementation)
+  uint32_t node_degree(uint32_t i) const {
+    return louds_select->distanceToNextSetBit(i);
+  }
+
+  // child_pos: rank on child → select on louds (mirrors SuRF's childPosPub)
+  uint32_t child_pos(uint32_t i) const {
+    return louds_select->select(child_rank->rank(i) + 1);
+  }
+};
+
+void compare_louds_fst(const std::string &filename) {
+  printf("Processing dataset...\n");
+  std::ifstream file(filename);
+  std::vector<std::string> keys;
+  std::string key;
+  while (std::getline(file, key)) keys.emplace_back(key);
+  std::sort(keys.begin(), keys.end());
+  auto new_end = std::unique(keys.begin(), keys.end());
+  keys.erase(new_end, keys.end());
+  printf("Done!\n");
+
+  printf("Building C2-FST...\n");
+  c2::FstCC<std::string> fst_cc;
+  fst_cc.build(keys.begin(), keys.end(), true, 0, 0);
+  printf("Done!\n");
+
+  auto topo = fst_cc.get_topo();   // LoudsSparseCC
+
+  printf("Building baseline (same trie, separate bitvectors)...\n");
+  LoudsSparseBaseline base;
+  base.build(topo);
+  printf("Done!\n");
+
+  // Build query position sets from the C2 trie; reuse for baseline (same trie)
+  std::vector<uint32_t> all_pos, child_pos, leaf_pos, node_pos;
+  for (uint32_t i = 0; i < topo->size(); i++) {
+    all_pos.push_back(i);
+    if (topo->has_child(i)) child_pos.push_back(i);
+    else                    leaf_pos.push_back(i);
+    if (topo->louds(i))     node_pos.push_back(i);
+  }
+  std::shuffle(all_pos.begin(),   all_pos.end(),   std::mt19937{1});
+  std::shuffle(leaf_pos.begin(),  leaf_pos.end(),  std::mt19937{2});
+  std::shuffle(node_pos.begin(),  node_pos.end(),  std::mt19937{3});
+  std::shuffle(child_pos.begin(), child_pos.end(), std::mt19937{4});
+
+  size_t get_time[2], leaf_id_time[2], degree_time[2], child_time[2];
+
+  printf("[GET]...\n");
+  auto start = std::chrono::high_resolution_clock::now();
+  for (auto i : all_pos) {
+    volatile auto r0 = topo->has_child(i);
+    volatile auto r1 = topo->louds(i);
+  }
+  auto end = std::chrono::high_resolution_clock::now();
+  get_time[0] = (end - start).count();
+
+  start = std::chrono::high_resolution_clock::now();
+  for (auto i : all_pos) { base.get(i); }
+  end = std::chrono::high_resolution_clock::now();
+  get_time[1] = (end - start).count();
+
+  printf("[LEAF_ID]...\n");
+  start = std::chrono::high_resolution_clock::now();
+  for (auto i : leaf_pos) { volatile auto r = topo->leaf_id(i); }
+  end = std::chrono::high_resolution_clock::now();
+  leaf_id_time[0] = (end - start).count();
+
+  start = std::chrono::high_resolution_clock::now();
+  for (auto i : leaf_pos) { volatile auto r = base.leaf_id(i); }
+  end = std::chrono::high_resolution_clock::now();
+  leaf_id_time[1] = (end - start).count();
+
+  printf("[DEGREE]...\n");
+  start = std::chrono::high_resolution_clock::now();
+  for (auto i : node_pos) { volatile auto r = topo->node_degree(i); }
+  end = std::chrono::high_resolution_clock::now();
+  degree_time[0] = (end - start).count();
+
+  start = std::chrono::high_resolution_clock::now();
+  for (auto i : node_pos) { volatile auto r = base.node_degree(i); }
+  end = std::chrono::high_resolution_clock::now();
+  degree_time[1] = (end - start).count();
+
+  printf("[CHILD_POS]...\n");
+  start = std::chrono::high_resolution_clock::now();
+  for (auto i : child_pos) { volatile auto r = topo->child_pos(i); }
+  end = std::chrono::high_resolution_clock::now();
+  child_time[0] = (end - start).count();
+
+  start = std::chrono::high_resolution_clock::now();
+  for (auto i : child_pos) { volatile auto r = base.child_pos(i); }
+  end = std::chrono::high_resolution_clock::now();
+  child_time[1] = (end - start).count();
+
+  // order: C2-FST(LoudsSparseCC) | baseline(separate bitvectors, same trie)
+  printf("GET(ns): %lf vs %lf\n",       (double)get_time[0]/all_pos.size(),    (double)get_time[1]/all_pos.size());
+  printf("LEAF_ID(ns): %lf vs %lf\n",   (double)leaf_id_time[0]/leaf_pos.size(),(double)leaf_id_time[1]/leaf_pos.size());
+  printf("DEGREE(ns): %lf vs %lf\n",    (double)degree_time[0]/node_pos.size(), (double)degree_time[1]/node_pos.size());
+  printf("CHILD_POS(ns): %lf vs %lf\n", (double)child_time[0]/child_pos.size(), (double)child_time[1]/child_pos.size());
   printf("Done!\n");
 }
 #endif
@@ -683,6 +866,12 @@ int main(int argc, char *argv[]) {
    case 12:
     printf("[COMPARE LOUDS MARISA]\n");
     compare_louds_marisa(argv[1], max_recursion, mask);
+    break;
+  #endif
+  #ifdef __COMPARE_FST__
+   case 13:
+    printf("[COMPARE LOUDS FST]\n");
+    compare_louds_fst(argv[1]);
     break;
   #endif
    default:

@@ -279,6 +279,45 @@ class MarisaCC : public StringPool<Key> {
   }
 #endif
 
+  auto leftmost_leaf_m(uint32_t pos) const -> int32_t {
+    while (topo_.has_child(pos))
+      pos = topo_.child_pos(pos);
+    return (int32_t)topo_.leaf_id(pos);
+  }
+
+  template <bool rev = reverse, typename = std::enable_if_t<!rev>>
+  auto successor(const key_type &key) const -> int32_t {
+    std::vector<uint32_t> stack;
+    uint32_t pos = 0, depth = 0;
+    while (true) {
+      uint32_t end = topo_.node_end(pos);
+      if (depth >= key.size()) return leftmost_leaf_m(pos);
+      uint8_t target = (uint8_t)key[depth];
+      uint32_t p = pos;
+      if (labels_[p] == terminator_) p++;
+      while (p < end && labels_[p] < target) p++;
+      if (p >= end) break;
+      if (labels_[p] > target) return leftmost_leaf_m(p);
+      // exact label match at p
+      if (topo_.is_link(p))
+        return (int32_t)topo_.leaf_id(p);  // link: treat as exact match
+      if (!topo_.has_child(p)) {
+        uint32_t lid = topo_.leaf_id(p);
+        if (depth + 1 == key.size()) return (int32_t)lid;
+        if (p + 1 < end) return leftmost_leaf_m(p + 1);
+        break;
+      }
+      stack.push_back(p);
+      pos = topo_.child_pos(p);
+      depth++;
+    }
+    while (!stack.empty()) {
+      uint32_t ap = stack.back(); stack.pop_back();
+      if (ap + 1 < topo_.node_end(ap)) return leftmost_leaf_m(ap + 1);
+    }
+    return -1;
+  }
+
   // returns matched length (-1 on mismatch)
   auto match(const key_type &key, uint32_t begin, uint32_t key_id) const -> uint32_t override {
     if constexpr (!reverse_) {

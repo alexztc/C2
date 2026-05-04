@@ -434,6 +434,117 @@ class CoCoCC {
     return {topo_.num_internals(), topo_.num_leaves()};
   }
 
+  auto leftmost_leaf_coco(uint32_t pos) const -> int32_t
+    requires std::is_same_v<topo_t, LoudsSparseCC>
+  {
+    while (topo_.has_child(pos))
+      pos = topo_.child_pos(pos);
+    return (int32_t)topo_.leaf_id(pos);
+  }
+
+  auto successor(const key_type &key) const -> int32_t
+    requires std::is_same_v<topo_t, LoudsSparseCC>
+  {
+    std::vector<uint32_t> stack;
+    uint32_t pos = 0, matched_len = 0;
+    uint32_t degree = root_degree_;
+
+    while (true) {
+      uint32_t macro_id = topo_.node_id(pos);
+      succinct::bit_vector::enumerator it(macros_, ptrs_[macro_id]);
+      size_t next = ptrs_[macro_id + 1];
+      encoding_t encoding = static_cast<encoding_t>(it.take(encoding_bits_));
+      Alphabet remap;
+
+      bool prefix_key = it.take(1);
+      if (matched_len >= key.size())
+        return leftmost_leaf_coco(pos + prefix_key);
+
+      uint32_t depth = it.take(depth_bits_) + 1;
+
+    #ifdef __DEGREE_IN_PLACE__
+      bool degree_in_place = it.take(1);
+      degree = (degree_in_place ? ds2i::read_delta(it) : topo_.node_degree(pos));
+    #endif
+
+      if (matched_len + depth > key.size())
+        return leftmost_leaf_coco(pos + prefix_key);
+
+      code_t first_code, code;
+      bool is_remap = (static_cast<int>(encoding) & 0x4);
+      if (!is_remap) {
+        code = encode(key, matched_len, depth);
+        first_code = it.take(optimizer_t::code_len(alphabet_, depth));
+      } else {
+        read_alphabet(it, remap);
+        code = encode_safe(key, matched_len, depth, remap);
+        first_code = it.take(optimizer_t::code_len(remap, depth));
+      }
+
+      if (code < first_code)
+        return leftmost_leaf_coco(pos + prefix_key);
+
+      uint32_t child_id;
+      code_t lower_bound_val;
+
+      if (code == first_code) {
+        child_id = prefix_key;
+        lower_bound_val = first_code;
+      } else {
+        uint32_t num_coded = degree - prefix_key - 1;
+        code_t target = code - first_code - 1;
+        std::pair<uint32_t, code_t> lb{(uint32_t)-1, (code_t)-1};
+        if (num_coded > 0) {
+          switch (encoding) {
+           case encoding_t::ELIAS_FANO: case encoding_t::EF_REMAP:
+            lb = lower_bound_elias_fano(it, next, num_coded, target); break;
+           case encoding_t::PACKED: case encoding_t::PA_REMAP:
+            lb = lower_bound_packed(it, next, num_coded, target); break;
+           case encoding_t::BITVECTOR: case encoding_t::BV_REMAP:
+            lb = lower_bound_bitvector(it, next, num_coded, target); break;
+           case encoding_t::DENSE: case encoding_t::DE_REMAP:
+            lb = lower_bound_dense(it, next, num_coded, target); break;
+           default: assert(false);
+          }
+        }
+        // uint32_t overflow when lb=={-1,-1}: child_id=prefix_key, lower_bound_val=first_code
+        child_id = lb.first + 1 + prefix_key;
+        lower_bound_val = lb.second + 1 + first_code;
+      }
+
+      uint32_t edge_pos = pos + child_id;
+
+      if (lower_bound_val == code) {
+        // exact match: descend or return leaf
+        if (!topo_.has_child(edge_pos))
+          return (int32_t)topo_.leaf_id(edge_pos);
+        stack.push_back(edge_pos);
+        pos = topo_.child_pos(edge_pos);
+        matched_len += depth;
+      #ifndef __DEGREE_IN_PLACE__
+        degree = topo_.node_degree(pos);
+      #endif
+        continue;
+      } else if (lower_bound_val < code) {
+        // lb < code: first child with code > query is at edge_pos + 1
+        if (edge_pos + 1 < pos + degree)
+          return leftmost_leaf_coco(edge_pos + 1);
+        // all children exhausted: fall through to backtrack
+      } else {
+        // lb > code: edge_pos is itself the successor's root
+        return leftmost_leaf_coco(edge_pos);
+      }
+
+      // backtrack
+      while (!stack.empty()) {
+        uint32_t ep = stack.back(); stack.pop_back();
+        if (ep + 1 < topo_.node_end(ep))
+          return leftmost_leaf_coco(ep + 1);
+      }
+      return -1;
+    }
+  }
+
 #ifdef __COMPARE_COCO__
   template <typename T = topo_t, typename = std::enable_if_t<std::is_same_v<T, LoudsCC>>>
   void to_louds_sux(std::unique_ptr<LoudsSux<>> &out) {

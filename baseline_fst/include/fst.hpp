@@ -86,6 +86,12 @@ class Trie {
 
     const surf::LoudsSparse* get_louds_sparse() const { return louds_sparse_.get(); }
 
+    int32_t successor_key(const std::string& key) const {
+        surf::LoudsSparse::Iter iter(const_cast<surf::LoudsSparse*>(louds_sparse_.get()));
+        bool found = louds_sparse_->moveToKeyGreaterThan(key, /*inclusive=*/true, iter);
+        return found ? 0 : -1;
+    }
+
   private:
     std::pair<position_t, level_t> traverse(const std::string& key) const;
 

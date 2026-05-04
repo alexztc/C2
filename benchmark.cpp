@@ -48,6 +48,17 @@ class FstCCWrapper {  // unified API
     return trie_.lookup(key);
   }
 
+  auto successor(const std::string &key) const -> int32_t {
+    return trie_.successor(key);
+  }
+
+  auto range_count_iter(const std::string &l, const std::string &r) const -> int32_t {
+    auto it = trie_.lower_bound(l, r);
+    int32_t cnt = 0;
+    while (it.valid()) { cnt++; it.next(); }
+    return cnt;
+  }
+
   auto space_cost() const -> size_t {
     return trie_.size_in_bits();
   }
@@ -98,6 +109,10 @@ class CoCoLSWrapper {  // unified API
     return trie_.lookup(key);
   }
 
+  auto successor(const std::string &key) const -> int32_t {
+    return trie_.successor(key);
+  }
+
   auto space_cost() const -> size_t {
     return trie_.size_in_bits();
   }
@@ -143,6 +158,10 @@ class MarisaCCWrapper {  // unified API
 
   __NOINLINE_IF_PROFILE auto lookup(const std::string &key) const -> uint32_t {
     return trie_.lookup(key);
+  }
+
+  auto successor(const std::string &key) const -> int32_t {
+    return trie_.successor(key);
   }
 
   auto space_cost() const -> size_t {
@@ -803,6 +822,199 @@ void compare_louds_marisa(const std::string &filename, int max_recursion, int ma
 }
 #endif
 
+void test_successor(const char *filename, uint32_t space_relaxation, int max_recursion, int mask) {
+  constexpr int   timed_reps      = 3;
+  constexpr int   range_widths[]  = {1, 10, 100, 1000};
+  constexpr size_t target_pairs   = 5000;
+
+  // ---- load & deduplicate ----
+  printf("Processing dataset...\n");
+  std::ifstream file(filename);
+  std::vector<std::string> keys;
+  std::string k;
+  while (std::getline(file, k)) keys.emplace_back(k);
+  std::sort(keys.begin(), keys.end());
+  keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+  size_t n = keys.size();
+  printf("Done! %zu keys\n", n);
+
+  // ---- build tries ----
+  printf("Building tries...\n");
+  FstCCWrapper    fst_cc(keys, space_relaxation, max_recursion, mask);
+  CoCoLSWrapper   coco_ls(keys, space_relaxation, max_recursion, mask);
+  MarisaCCWrapper marisa_cc(keys, space_relaxation, max_recursion, mask);
+  FstWrapper      fst_base(keys, space_relaxation, max_recursion, mask);
+  printf("Done!\n");
+
+  // ---- query generation ----
+  // hit: every key (shuffled)
+  std::vector<std::string> hit_q = keys;
+  std::shuffle(hit_q.begin(), hit_q.end(), std::mt19937{2});
+
+  // miss: keys[i] + '\x01' — a string that lies strictly between keys[i] and
+  // keys[i+1] in lex order, guaranteed not to be a key itself; successor = keys[i+1]
+  std::vector<std::string> miss_q;
+  miss_q.reserve(n - 1);
+  for (size_t i = 0; i + 1 < n; i++) miss_q.emplace_back(keys[i] + '\x01');
+  std::shuffle(miss_q.begin(), miss_q.end(), std::mt19937{3});
+
+  // range: (keys[i], keys[i+w]) pairs sampled uniformly; w keys lie in [l, r)
+  // l = keys[i]   — exact lower bound (inclusive hit)
+  // r = keys[i+w] — exclusive upper bound (next boundary), successor(r) = id(keys[i+w])
+  // range_count = id(keys[i+w]) − id(keys[i]) = w
+  struct RangePair { std::string l, r; };
+  auto make_range_queries = [&](int w) -> std::vector<RangePair> {
+    if ((size_t)w >= n) return {};
+    size_t n_valid = n - (size_t)w;
+    size_t stride  = std::max<size_t>(1, n_valid / target_pairs);
+    std::vector<RangePair> pairs;
+    pairs.reserve(std::min(target_pairs, n_valid));
+    for (size_t i = 0; i < n_valid; i += stride)
+      pairs.push_back({keys[i], keys[i + (size_t)w]});
+    std::shuffle(pairs.begin(), pairs.end(), std::mt19937{4u + (uint32_t)w});
+    return pairs;
+  };
+
+  // ---- timing helpers ----
+  auto measure_point = [&](auto &trie, const std::vector<std::string> &queries) -> double {
+    int64_t total = 0;
+    for (int rep = 0; rep < timed_reps; rep++) {
+      auto t0 = std::chrono::high_resolution_clock::now();
+      for (auto &q : queries) { volatile int32_t r = trie.successor(q); }
+      auto t1 = std::chrono::high_resolution_clock::now();
+      total += (t1 - t0).count();
+    }
+    return (double)total / ((double)timed_reps * queries.size());
+  };
+
+  auto measure_range = [&](auto &trie, const std::vector<RangePair> &pairs) -> double {
+    if (pairs.empty()) return 0.0;
+    int64_t total = 0;
+    for (int rep = 0; rep < timed_reps; rep++) {
+      auto t0 = std::chrono::high_resolution_clock::now();
+      for (auto &p : pairs) {
+        volatile int32_t a = trie.successor(p.l);
+        volatile int32_t b = trie.successor(p.r);
+        volatile int32_t cnt = b - a;
+      }
+      auto t1 = std::chrono::high_resolution_clock::now();
+      total += (t1 - t0).count();
+    }
+    return (double)total / ((double)timed_reps * pairs.size());
+  };
+
+  // ---- warmup (all tries, hit queries) ----
+  printf("Warming up...\n");
+  for (auto &q : hit_q) { volatile int32_t r = fst_cc.successor(q); }
+  for (auto &q : hit_q) { volatile int32_t r = coco_ls.successor(q); }
+  for (auto &q : hit_q) { volatile int32_t r = marisa_cc.successor(q); }
+  for (auto &q : hit_q) { volatile int32_t r = fst_base.successor(q); }
+
+  // ---- point queries (hit / miss) ----
+  printf("Measuring hit/miss...\n");
+  // output format: trie,query_type,range_width,latency_ns
+  // range_width = 0 for point queries; latency = ns per single successor call
+  struct TrieRow { const char *name; double hit, miss; };
+  TrieRow point_rows[] = {
+    {"C2-FST",        measure_point(fst_cc,    hit_q), measure_point(fst_cc,    miss_q)},
+    {"C2-CoCo(LS)",   measure_point(coco_ls,   hit_q), measure_point(coco_ls,   miss_q)},
+    {"C2-MARISA",     measure_point(marisa_cc, hit_q), measure_point(marisa_cc, miss_q)},
+    {"FST-baseline",  measure_point(fst_base,  hit_q), measure_point(fst_base,  miss_q)},
+  };
+  for (auto &row : point_rows) {
+    printf("%s,hit,0,%.2f\n",  row.name, row.hit);
+    printf("%s,miss,0,%.2f\n", row.name, row.miss);
+  }
+
+  // ---- range queries ----
+  // latency = ns per range_count(l,r) = time for two successive successor() calls
+  printf("Measuring range queries...\n");
+  for (int w : range_widths) {
+    auto pairs = make_range_queries(w);
+    if (pairs.empty()) { printf("# width %d: skipped (not enough keys)\n", w); continue; }
+    printf("# width=%d  n_pairs=%zu\n", w, pairs.size());
+    printf("C2-FST,range,%d,%.2f\n",       w, measure_range(fst_cc,    pairs));
+    printf("C2-CoCo(LS),range,%d,%.2f\n",  w, measure_range(coco_ls,   pairs));
+    printf("C2-MARISA,range,%d,%.2f\n",    w, measure_range(marisa_cc, pairs));
+    printf("FST-baseline,range,%d,%.2f\n", w, measure_range(fst_base,  pairs));
+  }
+  printf("[PASSED]\n");
+}
+
+void test_range_iter(const char *filename, uint32_t space_relaxation, int max_recursion, int mask) {
+  constexpr int    timed_reps     = 3;
+  constexpr int    range_widths[] = {1, 10, 100, 1000, 10000};
+  constexpr size_t target_pairs   = 5000;
+
+  printf("Processing dataset...\n");
+  std::ifstream file(filename);
+  std::vector<std::string> keys;
+  std::string k;
+  while (std::getline(file, k)) keys.emplace_back(k);
+  std::sort(keys.begin(), keys.end());
+  keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+  size_t n = keys.size();
+  printf("Done! %zu keys\n", n);
+
+  printf("Building tries...\n");
+  FstCCWrapper fst_cc(keys, space_relaxation, max_recursion, mask);
+  FstWrapper   fst_base(keys, space_relaxation, max_recursion, mask);
+  printf("Done!\n");
+
+  struct RangePair { std::string l, r; };
+  auto make_pairs = [&](int w) -> std::vector<RangePair> {
+    if ((size_t)w >= n) return {};
+    size_t n_valid = n - (size_t)w;
+    size_t stride  = std::max<size_t>(1, n_valid / target_pairs);
+    std::vector<RangePair> pairs;
+    pairs.reserve(std::min(target_pairs, n_valid));
+    for (size_t i = 0; i < n_valid; i += stride)
+      pairs.push_back({keys[i], keys[i + (size_t)w]});
+    std::shuffle(pairs.begin(), pairs.end(), std::mt19937{4u + (uint32_t)w});
+    return pairs;
+  };
+
+  // Warmup
+  for (int w : range_widths) {
+    auto pairs = make_pairs(w);
+    for (auto &p : pairs) {
+      volatile int32_t r = fst_cc.range_count_iter(p.l, p.r);
+      volatile int32_t s = fst_base.range_count_iter(p.l, p.r);
+    }
+  }
+
+  printf("Measuring range iteration...\n");
+  for (int w : range_widths) {
+    auto pairs = make_pairs(w);
+    if (pairs.empty()) { printf("# width %d: skipped\n", w); continue; }
+
+    // correctness check (first pair)
+    {
+      int32_t cnt_cc   = fst_cc.range_count_iter(pairs[0].l, pairs[0].r);
+      int32_t cnt_base = fst_base.range_count_iter(pairs[0].l, pairs[0].r);
+      if (cnt_cc != w || cnt_base != w)
+        printf("# WARNING w=%d: C2-FST cnt=%d  FST-base cnt=%d  expected=%d\n",
+               w, cnt_cc, cnt_base, w);
+    }
+
+    auto measure = [&](auto &trie) -> double {
+      int64_t total = 0;
+      for (int rep = 0; rep < timed_reps; rep++) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (auto &p : pairs) { volatile int32_t cnt = trie.range_count_iter(p.l, p.r); }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        total += (t1 - t0).count();
+      }
+      return (double)total / ((double)timed_reps * pairs.size());
+    };
+
+    printf("# width=%d  n_pairs=%zu\n", w, pairs.size());
+    printf("C2-FST,range_iter,%d,%.2f\n",      w, measure(fst_cc));
+    printf("FST-baseline,range_iter,%d,%.2f\n", w, measure(fst_base));
+  }
+  printf("[PASSED]\n");
+}
+
 int main(int argc, char *argv[]) {
   assert(argc >= 2);
 
@@ -874,6 +1086,14 @@ int main(int argc, char *argv[]) {
     compare_louds_fst(argv[1]);
     break;
   #endif
+   case 14:
+    printf("[TEST SUCCESSOR]\n");
+    test_successor(argv[1], space_relaxation, max_recursion, mask);
+    break;
+   case 15:
+    printf("[TEST RANGE ITER]\n");
+    test_range_iter(argv[1], space_relaxation, max_recursion, mask);
+    break;
    default:
     printf("unrecognized index; stopped\n");
   }

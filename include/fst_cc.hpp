@@ -384,6 +384,196 @@ class FstCC {
   auto get_topo() const -> const topo_t* { return &topo_; }
 
  private:
+  auto leftmost_leaf(uint32_t pos) const -> int32_t {
+    while (topo_.has_child(pos))
+      pos = topo_.child_pos(pos);
+    return (int32_t)topo_.leaf_id(pos);
+  }
+
+ public:
+  auto successor(const key_type &key) const -> int32_t {
+    std::vector<uint32_t> stack;
+    uint32_t pos = 0, depth = 0;
+    while (true) {
+      uint32_t end = topo_.node_end(pos);
+      if (depth >= key.size()) return leftmost_leaf(pos);
+      uint8_t target = (uint8_t)key[depth];
+      uint32_t p = pos;
+      if (get_label(p) == terminator_) p++;
+      while (p < end && get_label(p) < target) p++;
+      if (p >= end) break;
+      if (get_label(p) > target) return leftmost_leaf(p);
+      // exact label match at p
+      if (!topo_.has_child(p)) {
+        uint32_t lid = topo_.leaf_id(p);
+        if (!is_link_.get(lid)) {
+          if (depth + 1 == key.size()) return (int32_t)lid;
+          if (p + 1 < end) return leftmost_leaf(p + 1);
+          break;
+        }
+        return (int32_t)lid;  // link: treat as exact match
+      }
+      stack.push_back(p);
+      pos = topo_.child_pos(p);
+      depth++;
+    }
+    while (!stack.empty()) {
+      uint32_t ap = stack.back(); stack.pop_back();
+      if (ap + 1 < topo_.node_end(ap)) return leftmost_leaf(ap + 1);
+    }
+    return -1;
+  }
+
+ // -------------------------------------------------------------------------
+  // Iterator-based range query
+  // -------------------------------------------------------------------------
+  struct RangeIter {
+    const FstCC *trie_  = nullptr;
+    uint32_t pos_       = 0;
+    int32_t  rank_      = -1;
+    uint32_t level_     = 0;
+    key_type key_;
+    key_type end_key_;   // exclusive upper bound
+    bool     valid_     = false;
+
+    bool valid()             const { return valid_; }
+    int32_t      rank()      const { return rank_; }
+    const key_type& key()    const { return key_; }
+
+    // Advance to the next key in sorted order; returns valid().
+    bool next() {
+      while (level_ > 0) {
+        uint8_t lbl = trie_->get_label(pos_);
+        if (lbl == terminator_) {
+          // terminator is always the first edge in its node and never the last
+          pos_++;
+          uint8_t nl = trie_->get_label(pos_);
+          if (nl != terminator_) key_.push_back(nl);
+          go_leftmost();
+        } else if (pos_ + 1 < trie_->topo_.size() && !trie_->topo_.louds(pos_ + 1)) {
+          pos_++;                             // next sibling in same node
+          key_.back() = trie_->get_label(pos_);
+          go_leftmost();
+        } else {
+          key_.pop_back();                    // last edge — backtrack to parent
+          pos_ = trie_->topo_.parent_pos(pos_);
+          level_--;
+          continue;
+        }
+        rank_  = (int32_t)trie_->topo_.leaf_id(pos_);
+        valid_ = is_below_end(pos_);
+        return valid_;
+      }
+      rank_  = -1;
+      valid_ = false;
+      return false;
+    }
+
+   private:
+    void go_leftmost() {
+      while (trie_->topo_.has_child(pos_)) {
+        pos_ = trie_->topo_.child_pos(pos_);
+        level_++;
+        uint8_t l = trie_->get_label(pos_);
+        if (l != terminator_) key_.push_back(l);
+      }
+    }
+
+    // Stop condition: full key at p is strictly less than end_key_.
+    // For link nodes key_ is a truncated main-trie prefix; if key_ happens to be a
+    // proper prefix of end_key_ we consult the string pool to avoid a false positive.
+    // This pool call only fires when the iterator reaches end_key_'s own position
+    // (at most once per range_count_iter call), so it is O(1) amortised.
+    bool is_below_end(uint32_t p) const {
+      if (key_ >= end_key_) return false;
+      uint32_t lid = trie_->topo_.leaf_id(p);
+      if (!trie_->is_link_.get(lid)) return true;
+      // Link: key_ == full_key[0:key_.size()]. Check whether key_ is a proper prefix
+      // of end_key_ (the only case where key_ < end_key_ could be a false positive).
+      size_t k = key_.size(), e = end_key_.size();
+      if (k >= e) return true;   // key_ < end_key_ and no prefix ambiguity
+      for (size_t i = 0; i < k; i++) {
+        if (key_[i] != (uint8_t)end_key_[i]) return true;  // differ before k → clear
+      }
+      // key_ == end_key_[0:k]: consult pool to decide direction of the suffix.
+      // match() returns pool_len if end_key_[k:k+pool_len] fully matches the pool
+      // entry, or (uint32_t)-1 on any mismatch / key too short.
+      // matched == e-k  ↔  full_key == end_key_  →  NOT valid (exclusive bound).
+      // matched != e-k  ↔  full_key  < end_key_  →  valid (sorted-order invariant).
+      uint32_t lr = trie_->is_link_.rank1(lid);
+      uint32_t matched = trie_->next_->match(end_key_, (uint32_t)k, lr);
+      return matched != (uint32_t)(e - k);
+    }
+
+    friend class FstCC;
+  };
+
+  // Return an iterator over keys in [key, r). One trie traversal for key;
+  // stop condition uses string comparison + O(1)-amortised pool check.
+  auto lower_bound(const key_type& key, const key_type& r) const -> RangeIter {
+    struct Frame { uint32_t pos; bool pushed; };
+    std::vector<Frame> bt;
+
+    RangeIter it;
+    it.trie_    = this;
+    it.end_key_ = r;
+
+    uint32_t pos = 0, depth = 0;
+
+    auto land = [&](uint32_t p, bool go_left) {
+      uint8_t lbl = get_label(p);
+      it.pos_ = p;
+      if (lbl != terminator_) it.key_.push_back(lbl);
+      it.level_++;
+      if (go_left) it.go_leftmost();
+      it.rank_  = (int32_t)topo_.leaf_id(it.pos_);
+      it.valid_ = it.is_below_end(it.pos_);
+    };
+
+    while (true) {
+      uint32_t end = topo_.node_end(pos);
+
+      if (depth >= (uint32_t)key.size()) { land(pos, true); return it; }
+
+      uint8_t target = (uint8_t)key[depth];
+      uint32_t p = pos;
+      if (get_label(p) == terminator_) p++;
+      while (p < end && get_label(p) < target) p++;
+
+      if (p >= end) break;
+
+      uint8_t lbl = get_label(p);
+      if (lbl > target) { land(p, true); return it; }
+
+      // exact label match at p
+      if (!topo_.has_child(p)) {
+        uint32_t lid = topo_.leaf_id(p);
+        if (!is_link_.get(lid)) {
+          if (depth + 1 == (uint32_t)key.size()) { land(p, false); return it; }
+          if (p + 1 < end)                        { land(p + 1, true); return it; }
+          break;
+        }
+        land(p, false); return it;    // link leaf: treat as inclusive match
+      }
+
+      bool pushed = (lbl != terminator_);
+      if (pushed) it.key_.push_back(lbl);
+      it.level_++;
+      bt.push_back({p, pushed});
+      pos   = topo_.child_pos(p);
+      depth++;
+    }
+
+    while (!bt.empty()) {
+      auto [ap, pushed] = bt.back(); bt.pop_back();
+      if (pushed) it.key_.pop_back();
+      it.level_--;
+      if (ap + 1 < topo_.node_end(ap)) { land(ap + 1, true); return it; }
+    }
+    return it;   // rank_ = -1, no successor
+  }
+
+ private:
   void build(const KeySet<key_type> &key_set, bool temp = false,
              int max_recursion = 0, int mask = 0) {
     KeySet<key_type> suffixes;

@@ -1,0 +1,18 @@
+[submodule "lib/sdsl-lite"]
+	path = lib/sdsl-lite
+	url = https://github.com/vgteam/sdsl-lite.git
+[submodule "lib/ds2i"]
+	path = lib/ds2i
+	url = https://github.com/aboffa/ds2i.git
+[submodule "lib/sux"]
+	path = lib/sux
+	url = https://github.com/vigna/sux.git
+[submodule "lib/fsst"]
+	path = lib/fsst
+	url = https://github.com/cwida/fsst
+[submodule "baseline_marisa/marisa"]
+	path = baseline_marisa/marisa
+	url = https://github.com/s-yata/marisa-trie.git
+[submodule "baseline_ctriepp/ctriepp"]
+	path = baseline_ctriepp/ctriepp
+	url = https://gitlab.com/ofek.gila1/ctriepp.git

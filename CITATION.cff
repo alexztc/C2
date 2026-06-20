@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying paper."
+title: "C²: Cache-Conscious Succinct Tries with Adaptive Unary Path Compression"
+authors:
+  - family-names: Zhang
+    given-names: Kepan
+  - family-names: Zhao
+    given-names: Tiancheng
+  - family-names: Xu
+    given-names: Helen
+type: software
+preferred-citation:
+  type: article
+  title: "C²: Cache-Conscious Succinct Tries with Adaptive Unary Path Compression"
+  authors:
+    - family-names: Zhang
+      given-names: Kepan
+    - family-names: Zhao
+      given-names: Tiancheng
+    - family-names: Xu
+      given-names: Helen
+  year: 2026
+  url: "https://arxiv.org/abs/2606.16104"
+  identifiers:
+    - type: other
+      value: "arXiv:2606.16104"
+      description: "arXiv preprint identifier"
+    - type: doi
+      value: "10.48550/arXiv.2606.16104"
